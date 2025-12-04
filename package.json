@@ -1,0 +1,83 @@
+{
+  "name": "api-usage-tracker",
+  "displayName": "API Usage Tracker",
+  "description": "Track API usage for various AI API providers",
+  "version": "0.0.1",
+  "publisher": "your-publisher-name",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "apiUsageTracker.refresh",
+        "title": "API Usage: Refresh"
+      },
+      {
+        "command": "apiUsageTracker.showDetails",
+        "title": "API Usage: Show Details"
+      },
+      {
+        "command": "apiUsageTracker.configure",
+        "title": "API Usage: Configure"
+      }
+    ],
+    "configuration": {
+      "title": "API Usage Tracker",
+      "properties": {
+        "apiUsageTracker.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API Key"
+        },
+        "apiUsageTracker.endpoint": {
+          "type": "string",
+          "default": "",
+          "description": "API Endpoint URL (e.g., https://api.example.com)"
+        },
+        "apiUsageTracker.refreshInterval": {
+          "type": "number",
+          "default": 300,
+          "description": "Auto refresh interval in seconds (0 to disable)"
+        },
+        "apiUsageTracker.statusBarFormat": {
+          "type": "string",
+          "default": "compact",
+          "enum": ["compact", "detailed"],
+          "description": "Status bar display format"
+        },
+        "apiUsageTracker.initialBalance": {
+          "type": "number",
+          "default": 0,
+          "description": "Initial balance in USD (used to calculate remaining balance)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.54.0",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "axios": "^1.6.0"
+  }
+}
