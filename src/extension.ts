@@ -1,14 +1,25 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs';
 import { UniversalProvider, UsageResult } from './providers/universal';
+import {
+  isCCSwitchInstalled,
+  readCCSwitchProviders,
+  getCurrentProvider,
+  watchCCSwitchConfig,
+  switchProvider as ccSwitchProvider,
+  CCSwitchProvider
+} from './ccswitch';
 
 let statusBarItem: vscode.StatusBarItem;
 let refreshInterval: NodeJS.Timeout | undefined;
 let lastUsage: UsageResult | null = null;
+let ccSwitchWatcher: fs.FSWatcher | null = null;
+let currentProviderName: string = '';
 
 export function activate(context: vscode.ExtensionContext) {
   console.log('API Usage Tracker is now active');
 
-  // 创建状态栏项
+  // 创建状态栏项 - 点击打开菜单
   statusBarItem = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right,
     100
@@ -21,7 +32,8 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('apiUsageTracker.refresh', refreshUsage),
     vscode.commands.registerCommand('apiUsageTracker.showDetails', showDetails),
-    vscode.commands.registerCommand('apiUsageTracker.configure', openSettings)
+    vscode.commands.registerCommand('apiUsageTracker.configure', openSettings),
+    vscode.commands.registerCommand('apiUsageTracker.switchProvider', switchProvider)
   );
 
   // 监听配置变化
@@ -34,6 +46,14 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
+  // 监听 CC Switch 配置变化
+  if (isCCSwitchInstalled()) {
+    ccSwitchWatcher = watchCCSwitchConfig(() => {
+      console.log('CC Switch config changed, refreshing...');
+      refreshUsage();
+    });
+  }
+
   // 初始化
   setupAutoRefresh();
   refreshUsage();
@@ -42,6 +62,9 @@ export function activate(context: vscode.ExtensionContext) {
 export function deactivate() {
   if (refreshInterval) {
     clearInterval(refreshInterval);
+  }
+  if (ccSwitchWatcher) {
+    ccSwitchWatcher.close();
   }
 }
 
@@ -62,18 +85,48 @@ function setupAutoRefresh() {
   }
 }
 
-async function refreshUsage() {
+/**
+ * 获取 API 配置，优先使用 CC Switch
+ */
+function getApiConfig(): { apiKey: string; endpoint: string; providerName: string } {
+  // 优先检查 CC Switch
+  if (isCCSwitchInstalled()) {
+    const provider = getCurrentProvider();
+    if (provider && provider.apiKey && provider.endpoint) {
+      return {
+        apiKey: provider.apiKey,
+        endpoint: provider.endpoint,
+        providerName: provider.name
+      };
+    }
+  }
+
+  // 回退到 VSCode 配置
   const config = getConfig();
-  const apiKey = config.get<string>('apiKey', '');
-  const endpoint = config.get<string>('endpoint', '');
+  return {
+    apiKey: config.get<string>('apiKey', ''),
+    endpoint: config.get<string>('endpoint', ''),
+    providerName: ''
+  };
+}
+
+async function refreshUsage() {
+  const { apiKey, endpoint, providerName } = getApiConfig();
+  currentProviderName = providerName;
 
   if (!apiKey || !endpoint) {
-    statusBarItem.text = '$(key) Configure API';
-    statusBarItem.tooltip = 'Click to configure API Key and Endpoint';
+    if (isCCSwitchInstalled()) {
+      statusBarItem.text = '$(plug) 选择 Provider';
+      statusBarItem.tooltip = '点击选择 CC Switch Provider';
+    } else {
+      statusBarItem.text = '$(key) Configure API';
+      statusBarItem.tooltip = 'Click to configure API Key and Endpoint';
+    }
     return;
   }
 
-  statusBarItem.text = '$(sync~spin) Loading...';
+  const prefix = providerName ? `[${providerName}] ` : '';
+  statusBarItem.text = `$(sync~spin) ${prefix}Loading...`;
 
   try {
     const provider = new UniversalProvider(apiKey, endpoint);
@@ -82,7 +135,7 @@ async function refreshUsage() {
     updateStatusBar(result);
   } catch (error) {
     console.error('Failed to refresh usage:', error);
-    statusBarItem.text = '$(error) Error';
+    statusBarItem.text = `$(error) ${prefix}Error`;
     statusBarItem.tooltip = 'Failed to fetch usage data';
   }
 }
@@ -90,9 +143,10 @@ async function refreshUsage() {
 function updateStatusBar(usage: UsageResult) {
   const config = getConfig();
   const initialBalance = config.get<number>('initialBalance', 0);
+  const prefix = currentProviderName ? `[${currentProviderName}] ` : '';
 
   if (usage.error) {
-    statusBarItem.text = `$(warning) ${usage.error}`;
+    statusBarItem.text = `$(warning) ${prefix}${usage.error}`;
     statusBarItem.tooltip = usage.error;
     return;
   }
@@ -104,9 +158,9 @@ function updateStatusBar(usage: UsageResult) {
 
   // 状态栏显示剩余余额（如果有）或今日消耗
   if (hasApiBalance || initialBalance > 0) {
-    statusBarItem.text = `$(credit-card) 余额: $${remaining.toFixed(2)}`;
+    statusBarItem.text = `$(credit-card) ${prefix}$${remaining.toFixed(2)}`;
   } else {
-    statusBarItem.text = `$(credit-card) 今日: $${usage.todayUsed.toFixed(2)}`;
+    statusBarItem.text = `$(credit-card) ${prefix}今日: $${usage.todayUsed.toFixed(2)}`;
   }
 
   // 使用 MarkdownString 创建富文本 tooltip
@@ -114,6 +168,9 @@ function updateStatusBar(usage: UsageResult) {
   md.isTrusted = true;
   md.supportHtml = true;
 
+  if (currentProviderName) {
+    md.appendMarkdown(`### 🔌 ${currentProviderName}\n\n`);
+  }
   md.appendMarkdown(`### 📊 API 用量统计\n\n`);
 
   // 剩余余额（如果有 API 余额或设置了初始余额）
@@ -134,7 +191,7 @@ function updateStatusBar(usage: UsageResult) {
   md.appendMarkdown(`🟢 **总费用**: $${usage.totalUsed.toFixed(4)}\n\n`);
 
   md.appendMarkdown(`---\n\n`);
-  md.appendMarkdown(`*点击查看详情*`);
+  md.appendMarkdown(`*点击查看详情或切换 Provider*`);
 
   statusBarItem.tooltip = md;
 }
@@ -142,57 +199,98 @@ function updateStatusBar(usage: UsageResult) {
 async function showDetails() {
   const config = getConfig();
   const initialBalance = config.get<number>('initialBalance', 0);
+  const hasCCSwitch = isCCSwitchInstalled();
+  console.log('CC Switch installed:', hasCCSwitch);
 
-  if (!lastUsage || lastUsage.error) {
-    const action = await vscode.window.showInformationMessage(
-      'No API usage data available. Would you like to configure?',
-      'Configure',
-      'Cancel'
-    );
-    if (action === 'Configure') {
-      openSettings();
+  let providers: CCSwitchProvider[] = [];
+  if (hasCCSwitch) {
+    try {
+      providers = readCCSwitchProviders();
+      console.log('Providers loaded:', providers.length, providers.map(p => p.name));
+    } catch (err) {
+      console.error('Failed to load providers:', err);
     }
-    return;
   }
-
-  // 优先使用 API 返回的余额
-  const hasApiBalance = lastUsage.total > 0;
-  const remaining = hasApiBalance ? lastUsage.remaining : (initialBalance > 0 ? initialBalance - lastUsage.totalUsed : 0);
-  const total = hasApiBalance ? lastUsage.total : initialBalance;
 
   // 使用 QuickPick 显示详情
   const items: vscode.QuickPickItem[] = [];
 
-  // 如果有余额信息，显示余额
-  if (hasApiBalance || initialBalance > 0) {
-    const usagePercent = total > 0 ? ((lastUsage.totalUsed / total) * 100).toFixed(1) : '0';
+  // 如果有 CC Switch，显示 Provider 列表
+  if (hasCCSwitch && providers.length > 0) {
     items.push(
-      {
+      { label: 'CC Switch Providers', kind: vscode.QuickPickItemKind.Separator }
+    );
+
+    for (const p of providers) {
+      items.push({
+        label: `${p.isCurrent ? '$(check) ' : '$(circle-outline) '}${p.name}`,
+        description: p.isCurrent ? '当前' : '',
+        detail: p.endpoint
+      });
+    }
+
+    items.push({ label: '', kind: vscode.QuickPickItemKind.Separator });
+  }
+
+  // 显示用量信息
+  if (lastUsage && !lastUsage.error) {
+    const hasApiBalance = lastUsage.total > 0;
+    const remaining = hasApiBalance ? lastUsage.remaining : (initialBalance > 0 ? initialBalance - lastUsage.totalUsed : 0);
+    const total = hasApiBalance ? lastUsage.total : initialBalance;
+
+    items.push(
+      { label: '用量信息', kind: vscode.QuickPickItemKind.Separator }
+    );
+
+    if (hasApiBalance || initialBalance > 0) {
+      const usagePercent = total > 0 ? ((lastUsage.totalUsed / total) * 100).toFixed(1) : '0';
+      items.push({
         label: '$(credit-card) 剩余余额',
         description: `$${remaining.toFixed(2)}`,
         detail: `总额度 $${total.toFixed(2)}，已使用 ${usagePercent}%`
+      });
+    }
+
+    items.push(
+      {
+        label: '$(calendar) 每日费用',
+        description: `$${lastUsage.todayUsed.toFixed(4)}`,
+        detail: '今日 API 调用费用'
       },
-      { label: '', kind: vscode.QuickPickItemKind.Separator }
+      {
+        label: '$(calendar) 本月费用',
+        description: `$${lastUsage.monthUsed.toFixed(4)}`,
+        detail: '本月累计 API 调用费用'
+      },
+      {
+        label: '$(graph) 总费用',
+        description: `$${lastUsage.totalUsed.toFixed(4)}`,
+        detail: '历史累计 API 调用费用'
+      }
     );
+  } else {
+    items.push({
+      label: '$(info) 无用量数据',
+      description: '',
+      detail: '请先配置 API 或选择 CC Switch Provider'
+    });
+  }
+
+  // 操作按钮
+  items.push(
+    { label: '', kind: vscode.QuickPickItemKind.Separator }
+  );
+
+  // 如果有 CC Switch，添加切换 Provider 选项
+  if (hasCCSwitch && providers.length > 0) {
+    items.push({
+      label: '$(arrow-swap) 切换 Provider',
+      description: currentProviderName || '',
+      detail: '切换 CC Switch API Provider'
+    });
   }
 
   items.push(
-    {
-      label: '$(calendar) 每日费用',
-      description: `$${lastUsage.todayUsed.toFixed(4)}`,
-      detail: '今日 API 调用费用'
-    },
-    {
-      label: '$(calendar) 本月费用',
-      description: `$${lastUsage.monthUsed.toFixed(4)}`,
-      detail: '本月累计 API 调用费用'
-    },
-    {
-      label: '$(graph) 总费用',
-      description: `$${lastUsage.totalUsed.toFixed(4)}`,
-      detail: '历史累计 API 调用费用'
-    },
-    { label: '', kind: vscode.QuickPickItemKind.Separator },
     {
       label: '$(refresh) 刷新数据',
       description: '',
@@ -206,16 +304,78 @@ async function showDetails() {
   );
 
   const selected = await vscode.window.showQuickPick(items, {
-    title: `API 用量详情 (${lastUsage.type})`,
+    title: currentProviderName ? `API 用量 - ${currentProviderName}` : 'API 用量详情',
     placeHolder: '选择操作'
   });
 
   if (selected) {
-    if (selected.label.includes('刷新')) {
+    if (selected.label.includes('切换 Provider')) {
+      await showProviderPicker(providers);
+    } else if (selected.label.includes('刷新')) {
       refreshUsage();
     } else if (selected.label.includes('设置')) {
       openSettings();
     }
+  }
+}
+
+async function showProviderPicker(providers: CCSwitchProvider[]) {
+  const items = providers.map(p => ({
+    label: `${p.isCurrent ? '$(check) ' : '$(circle-outline) '}${p.name}`,
+    description: p.isCurrent ? '当前' : '',
+    detail: p.endpoint,
+    provider: p
+  }));
+
+  const selected = await vscode.window.showQuickPick(items, {
+    title: '切换 CC Switch Provider',
+    placeHolder: '选择要切换的 Provider'
+  });
+
+  if (selected && !selected.provider.isCurrent) {
+    await switchToProvider(selected.provider);
+  }
+}
+
+async function switchProvider() {
+  if (!isCCSwitchInstalled()) {
+    vscode.window.showWarningMessage('CC Switch 未安装，请先安装 CC Switch');
+    return;
+  }
+
+  const providers = readCCSwitchProviders();
+  if (providers.length === 0) {
+    vscode.window.showWarningMessage('CC Switch 中没有配置 Provider');
+    return;
+  }
+
+  const items = providers.map(p => ({
+    label: `${p.isCurrent ? '$(check) ' : ''}${p.name}`,
+    description: p.isCurrent ? '当前' : '',
+    detail: p.endpoint,
+    provider: p
+  }));
+
+  const selected = await vscode.window.showQuickPick(items, {
+    title: '切换 CC Switch Provider',
+    placeHolder: '选择要切换的 Provider'
+  });
+
+  if (selected && !selected.provider.isCurrent) {
+    await switchToProvider(selected.provider);
+  }
+}
+
+async function switchToProvider(provider: CCSwitchProvider) {
+  // 直接切换 Provider
+  const success = ccSwitchProvider(provider.id);
+
+  if (success) {
+    vscode.window.showInformationMessage(`已切换到 "${provider.name}"`);
+    // 刷新余额显示
+    await refreshUsage();
+  } else {
+    vscode.window.showErrorMessage(`切换到 "${provider.name}" 失败`);
   }
 }
 
