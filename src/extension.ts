@@ -196,6 +196,12 @@ function updateStatusBar(usage: UsageResult) {
   statusBarItem.tooltip = md;
 }
 
+// 扩展 QuickPickItem 以存储 provider 引用
+interface ProviderQuickPickItem extends vscode.QuickPickItem {
+  provider?: CCSwitchProvider;
+  action?: 'switch' | 'refresh' | 'settings';
+}
+
 async function showDetails() {
   const config = getConfig();
   const initialBalance = config.get<number>('initialBalance', 0);
@@ -213,7 +219,7 @@ async function showDetails() {
   }
 
   // 使用 QuickPick 显示详情
-  const items: vscode.QuickPickItem[] = [];
+  const items: ProviderQuickPickItem[] = [];
 
   // 如果有 CC Switch，显示 Provider 列表
   if (hasCCSwitch && providers.length > 0) {
@@ -225,7 +231,8 @@ async function showDetails() {
       items.push({
         label: `${p.isCurrent ? '$(check) ' : '$(circle-outline) '}${p.name}`,
         description: p.isCurrent ? '当前' : '',
-        detail: p.endpoint
+        detail: p.endpoint,
+        provider: p  // 存储 provider 引用
       });
     }
 
@@ -286,7 +293,8 @@ async function showDetails() {
     items.push({
       label: '$(arrow-swap) 切换 Provider',
       description: currentProviderName || '',
-      detail: '切换 CC Switch API Provider'
+      detail: '切换 CC Switch API Provider',
+      action: 'switch'
     });
   }
 
@@ -294,12 +302,14 @@ async function showDetails() {
     {
       label: '$(refresh) 刷新数据',
       description: '',
-      detail: '重新获取最新用量数据'
+      detail: '重新获取最新用量数据',
+      action: 'refresh'
     },
     {
       label: '$(gear) 打开设置',
       description: '',
-      detail: '配置 API Key 和 Endpoint'
+      detail: '配置 API Key 和 Endpoint',
+      action: 'settings'
     }
   );
 
@@ -309,12 +319,22 @@ async function showDetails() {
   });
 
   if (selected) {
-    if (selected.label.includes('切换 Provider')) {
+    console.log('Selected item:', selected.label, 'action:', selected.action, 'provider:', selected.provider?.name);
+
+    if (selected.action === 'switch') {
       await showProviderPicker(providers);
-    } else if (selected.label.includes('刷新')) {
+    } else if (selected.action === 'refresh') {
       refreshUsage();
-    } else if (selected.label.includes('设置')) {
+    } else if (selected.action === 'settings') {
       openSettings();
+    } else if (selected.provider) {
+      // 点击了 Provider 列表中的某个 Provider
+      console.log('Clicked provider:', selected.provider.name, 'isCurrent:', selected.provider.isCurrent);
+      if (!selected.provider.isCurrent) {
+        await switchToProvider(selected.provider);
+      } else {
+        vscode.window.showInformationMessage(`"${selected.provider.name}" 已是当前 Provider`);
+      }
     }
   }
 }
@@ -367,15 +387,23 @@ async function switchProvider() {
 }
 
 async function switchToProvider(provider: CCSwitchProvider) {
-  // 直接切换 Provider
-  const success = ccSwitchProvider(provider.id);
+  console.log('switchToProvider called with:', provider.id, provider.name);
 
-  if (success) {
-    vscode.window.showInformationMessage(`已切换到 "${provider.name}"`);
-    // 刷新余额显示
-    await refreshUsage();
-  } else {
-    vscode.window.showErrorMessage(`切换到 "${provider.name}" 失败`);
+  try {
+    // 直接切换 Provider
+    const success = ccSwitchProvider(provider.id);
+    console.log('ccSwitchProvider result:', success);
+
+    if (success) {
+      vscode.window.showInformationMessage(`已切换到 "${provider.name}"`);
+      // 刷新余额显示
+      await refreshUsage();
+    } else {
+      vscode.window.showErrorMessage(`切换到 "${provider.name}" 失败`);
+    }
+  } catch (error) {
+    console.error('switchToProvider error:', error);
+    vscode.window.showErrorMessage(`切换失败: ${error}`);
   }
 }
 
